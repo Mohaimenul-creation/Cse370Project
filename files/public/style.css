@@ -43,4 +43,20 @@ button:hover {
 
 .pet h3 {
     margin: 0 0 10px 0;
+} 
+.analytics {
+    background-color: white;
+    margin: 15px 0;
+    padding: 15px;
+    border-radius: 8px;
+    text-align: left;
 }
+
+.analytics h3 {
+    margin: 0 0 10px 0;
+}
+
+.analytics p {
+    margin: 5px 0;
+}
+
