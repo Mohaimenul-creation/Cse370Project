@@ -777,6 +777,123 @@ app.get("/api/test", async (req, res) => {
     }
 
 });
+// FEATURE 1 Adoption analytics based on breed
+
+app.get("/analytics/adoption-breed", async (req, res) => {
+    try {
+
+        const [rows] = await db.query(`
+            SELECT 
+                pet.Breed_Name,
+                COUNT(adoption_application.Application_id) AS Applications
+            FROM pet
+            JOIN adoption_application
+                ON pet.Pet_id = adoption_application.Pet_id
+            GROUP BY pet.Breed_Name
+            ORDER BY Applications DESC
+        `);
+
+        res.json(rows);
+
+    } catch (error) {
+        console.error("Adoption analytics error:", error);
+
+        res.status(500).json({
+            error: "Failed to load adoption analytics"
+        });
+    }
+});
+
+// FEATURE 2  Compare each pet's medical records with average
+
+
+app.get("/analytics/medical", async (req, res) => {
+    try {
+
+        const [rows] = await db.query(`
+            SELECT
+                pet.Pet_id,
+                pet.Name,
+                COUNT(medical_record.Medical_id) AS Medical_records,
+
+                (
+                    SELECT AVG(record_count)
+                    FROM (
+                        SELECT COUNT(Medical_id) AS record_count
+                        FROM medical_record
+                        GROUP BY Pet_id
+                    ) AS medical_counts
+                ) AS Average_records
+
+            FROM pet
+            LEFT JOIN medical_record
+                ON pet.Pet_id = medical_record.Pet_id
+
+            GROUP BY pet.Pet_id, pet.Name
+
+            ORDER BY pet.Pet_id
+        `);
+
+        // Add comparison text
+        rows.forEach(pet => {
+
+            if (pet.Medical_records > pet.Average_records) {
+                pet.Comparison = "Above Average";
+            }
+            else if (pet.Medical_records < pet.Average_records) {
+                pet.Comparison = "Below Average";
+            }
+            else {
+                pet.Comparison = "Average";
+            }
+
+        });
+
+        res.json(rows);
+
+    } catch (error) {
+        console.error("Medical analytics error:", error);
+
+        res.status(500).json({
+            error: "Failed to load medical analytics"
+        });
+    }
+});
+
+// FEATURE 3  Categories with above average spending
+
+
+app.get("/analytics/expenses", async (req, res) => {
+    try {
+
+        const [rows] = await db.query(`
+            SELECT
+                Category_name,
+                SUM(Amount) AS Total_spending
+            FROM expense
+            GROUP BY Category_name
+            HAVING SUM(Amount) > (
+                SELECT AVG(category_total)
+                FROM (
+                    SELECT SUM(Amount) AS category_total
+                    FROM expense
+                    GROUP BY Category_name
+                ) AS category_spending
+            )
+            ORDER BY Total_spending DESC
+        `);
+
+        res.json(rows);
+
+    } catch (error) {
+        console.error("Expense analytics error:", error);
+
+        res.status(500).json({
+            error: "Failed to load expense analytics"
+        });
+    }
+});
+
 
 
 // =====================================================
