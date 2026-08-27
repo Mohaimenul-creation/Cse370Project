@@ -5,64 +5,149 @@ const mysql = require("mysql2/promise");
 const app = express();
 const PORT = 3000;
 
-// Allow JSON data from frontend
 app.use(express.json());
-
-// Serve HTML, CSS and JavaScript from public folder
+app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, "public")));
 
-// ===============================
+// ============================================================
 // DATABASE CONNECTION
-// ===============================
+// ============================================================
 
 const db = mysql.createPool({
     host: "localhost",
     user: "root",
-    password: "",              // Put your MySQL password here
-    database: "find_my_paw",   // Your database name
+    password: "",
+    database: "pet_platform",
     waitForConnections: true,
     connectionLimit: 10,
     queueLimit: 0
 });
 
-// Test database connection
-async function testDatabase() {
-    try {
-        const connection = await db.getConnection();
-        console.log("MySQL connected successfully!");
-        connection.release();
-    } catch (error) {
-        console.error("MySQL connection failed:", error.message);
-    }
+
+// ============================================================
+// HELPER FUNCTION
+// ============================================================
+
+async function petExists(petId) {
+    const [rows] = await db.query(
+        "SELECT Pet_id FROM pet WHERE Pet_id = ?",
+        [petId]
+    );
+
+    return rows.length > 0;
 }
 
-testDatabase();
 
+// ============================================================
+// EXISTING PET API
+// ============================================================
 
-// =====================================================
-// BASIC PET ROUTE
-// =====================================================
-
-// Get all pets
 app.get("/pet", async (req, res) => {
-
     try {
-
         res.set("Cache-Control", "no-store");
 
         const [rows] = await db.query(`
-            SELECT *
-            FROM Pet
+            SELECT
+                p.*,
+                u.Name AS Owner_name
+            FROM pet p
+            LEFT JOIN user u
+                ON p.Owner_id = u.User_id
+            ORDER BY p.Pet_id
         `);
 
         res.json(rows);
 
     } catch (error) {
-
-        console.error("Database error:", error);
+        console.error(error);
 
         res.status(500).json({
-            error: "Failed to fetch pets"
+            error: "Failed to load pets"
+        });
+    }
+});
+
+
+// ============================================================
+// FEATURE 1
+// KEEP VACCINATION AND MEDICAL RECORDS
+// ============================================================
+
+
+// ------------------------------------------------------------
+// GET ALL HEALTH RECORDS FOR A PET
+// ------------------------------------------------------------
+
+app.get("/pets/:petId/health", async (req, res) => {
+
+    try {
+
+        const petId = Number(req.params.petId);
+
+        if (!Number.isInteger(petId)) {
+            return res.status(400).json({
+                error: "Invalid pet ID"
+            });
+        }
+
+
+        // Get pet
+
+        const [petRows] = await db.query(`
+            SELECT *
+            FROM pet
+            WHERE Pet_id = ?
+        `, [petId]);
+
+
+        if (petRows.length === 0) {
+            return res.status(404).json({
+                error: "Pet not found"
+            });
+        }
+
+
+        // Get vaccination records
+
+        const [vaccinations] = await db.query(`
+            SELECT
+                Vaccination_name,
+                Pet_id,
+                Initial_date,
+                Next_due_date
+            FROM vaccination
+            WHERE Pet_id = ?
+            ORDER BY Next_due_date ASC
+        `, [petId]);
+
+
+        // Get medical records
+
+        const [medicalRecords] = await db.query(`
+            SELECT
+                Medical_id,
+                Checkup_date,
+                Pet_id,
+                Diagnosis,
+                Treatment_status
+            FROM medical_record
+            WHERE Pet_id = ?
+            ORDER BY Checkup_date DESC
+        `, [petId]);
+
+
+        res.json({
+            pet: petRows[0],
+            vaccinations: vaccinations,
+            medicalRecords: medicalRecords
+        });
+
+    } catch (error) {
+
+        console.error(error);
+
+        res.status(500).json({
+            error: "Failed to load health records"
         });
 
     }
@@ -70,58 +155,72 @@ app.get("/pet", async (req, res) => {
 });
 
 
-// =====================================================
-// FEATURE 1: VACCINATION AND MEDICAL RECORDS
-// =====================================================
+// ------------------------------------------------------------
+// GET VACCINATION RECORDS
+// ------------------------------------------------------------
 
-
-// Get all vaccination records of a particular pet
-app.get("/api/health/pet/:petId", async (req, res) => {
+app.get("/pets/:petId/vaccinations", async (req, res) => {
 
     try {
 
-        const petId = req.params.petId;
+        const petId = Number(req.params.petId);
+
+        if (!Number.isInteger(petId)) {
+
+            return res.status(400).json({
+                error: "Invalid pet ID"
+            });
+
+        }
+
+
+        if (!(await petExists(petId))) {
+
+            return res.status(404).json({
+                error: "Pet not found"
+            });
+
+        }
+
 
         const [rows] = await db.query(`
-
             SELECT
-                p.pet_id,
-                p.name AS pet_name,
-                p.species,
-                p.breed_name,
+                Vaccination_name,
+                Pet_id,
+                Initial_date,
+                Next_due_date,
 
-                v.vaccination_name,
-                v.initial_date,
-                v.next_due_date,
+                CASE
 
-                m.checkup_date,
-                m.diagnosis,
-                m.treatment_status
+                    WHEN Next_due_date < CURDATE()
+                    THEN 'Overdue'
 
-            FROM Pet p
+                    WHEN Next_due_date <=
+                        DATE_ADD(CURDATE(), INTERVAL 30 DAY)
 
-            LEFT JOIN Vaccination v
-                ON p.pet_id = v.pet_id
+                    THEN 'Due Soon'
 
-            LEFT JOIN Medical_record m
-                ON p.pet_id = m.pet_id
+                    ELSE 'Up to Date'
 
-            WHERE p.pet_id = ?
+                END AS vaccine_status
 
-            ORDER BY
-                v.next_due_date ASC,
-                m.checkup_date DESC
+            FROM vaccination
+
+            WHERE Pet_id = ?
+
+            ORDER BY Next_due_date ASC
 
         `, [petId]);
+
 
         res.json(rows);
 
     } catch (error) {
 
-        console.error("Health database error:", error);
+        console.error(error);
 
         res.status(500).json({
-            error: "Failed to fetch health records"
+            error: "Failed to load vaccination records"
         });
 
     }
@@ -129,48 +228,125 @@ app.get("/api/health/pet/:petId", async (req, res) => {
 });
 
 
-// Add vaccination record
-app.post("/api/vaccinations", async (req, res) => {
+// ------------------------------------------------------------
+// ADD VACCINATION RECORD
+// ------------------------------------------------------------
+
+app.post("/pets/:petId/vaccinations", async (req, res) => {
 
     try {
 
+        const petId = Number(req.params.petId);
+
         const {
             vaccination_name,
-            pet_id,
             initial_date,
             next_due_date
         } = req.body;
 
-        const [result] = await db.query(`
 
-            INSERT INTO Vaccination
+        if (!Number.isInteger(petId)) {
+
+            return res.status(400).json({
+                error: "Invalid pet ID"
+            });
+
+        }
+
+
+        if (
+            !vaccination_name ||
+            !initial_date ||
+            !next_due_date
+        ) {
+
+            return res.status(400).json({
+
+                error:
+                    "Vaccination name, initial date and next due date are required"
+
+            });
+
+        }
+
+
+        if (!(await petExists(petId))) {
+
+            return res.status(404).json({
+                error: "Pet not found"
+            });
+
+        }
+
+
+        /*
+         Your existing vaccination table uses
+         Vaccination_name + Pet_id.
+
+         Therefore we use INSERT ... ON DUPLICATE KEY UPDATE.
+        */
+
+        await db.query(`
+
+            INSERT INTO vaccination
             (
-                vaccination_name,
-                pet_id,
-                initial_date,
-                next_due_date
+                Vaccination_name,
+                Pet_id,
+                Initial_date,
+                Next_due_date
             )
 
             VALUES (?, ?, ?, ?)
 
+            ON DUPLICATE KEY UPDATE
+
+                Initial_date = VALUES(Initial_date),
+                Next_due_date = VALUES(Next_due_date)
+
         `, [
             vaccination_name,
-            pet_id,
+            petId,
             initial_date,
             next_due_date
         ]);
 
-        res.json({
-            message: "Vaccination record added successfully!",
-            vaccination_id: result.insertId
+
+        /*
+         Keep the vaccination information already
+         present in the pet table updated.
+        */
+
+        await db.query(`
+
+            UPDATE pet
+
+            SET
+                Vaccine_name = ?,
+                Due_date = ?
+
+            WHERE Pet_id = ?
+
+        `, [
+            vaccination_name,
+            next_due_date,
+            petId
+        ]);
+
+
+        res.status(201).json({
+
+            message:
+                "Vaccination record saved successfully"
+
         });
+
 
     } catch (error) {
 
-        console.error("Vaccination error:", error);
+        console.error(error);
 
         res.status(500).json({
-            error: "Failed to add vaccination"
+            error: "Failed to save vaccination record"
         });
 
     }
@@ -178,45 +354,158 @@ app.post("/api/vaccinations", async (req, res) => {
 });
 
 
-// Add medical record
-app.post("/api/medical-records", async (req, res) => {
+// ------------------------------------------------------------
+// GET MEDICAL RECORDS
+// ------------------------------------------------------------
+
+app.get("/pets/:petId/medical", async (req, res) => {
 
     try {
 
+        const petId = Number(req.params.petId);
+
+
+        if (!Number.isInteger(petId)) {
+
+            return res.status(400).json({
+                error: "Invalid pet ID"
+            });
+
+        }
+
+
+        if (!(await petExists(petId))) {
+
+            return res.status(404).json({
+                error: "Pet not found"
+            });
+
+        }
+
+
+        const [rows] = await db.query(`
+
+            SELECT
+
+                Medical_id,
+                Checkup_date,
+                Pet_id,
+                Diagnosis,
+                Treatment_status
+
+            FROM medical_record
+
+            WHERE Pet_id = ?
+
+            ORDER BY
+                Checkup_date DESC
+
+        `, [petId]);
+
+
+        res.json(rows);
+
+
+    } catch (error) {
+
+        console.error(error);
+
+        res.status(500).json({
+            error: "Failed to load medical records"
+        });
+
+    }
+
+});
+
+
+// ------------------------------------------------------------
+// ADD MEDICAL RECORD
+// ------------------------------------------------------------
+
+app.post("/pets/:petId/medical", async (req, res) => {
+
+    try {
+
+        const petId = Number(req.params.petId);
+
+
         const {
             checkup_date,
-            pet_id,
             diagnosis,
             treatment_status
         } = req.body;
 
+
+        if (!Number.isInteger(petId)) {
+
+            return res.status(400).json({
+                error: "Invalid pet ID"
+            });
+
+        }
+
+
+        if (
+            !checkup_date ||
+            !diagnosis ||
+            !treatment_status
+        ) {
+
+            return res.status(400).json({
+
+                error:
+                    "Checkup date, diagnosis and treatment status are required"
+
+            });
+
+        }
+
+
+        if (!(await petExists(petId))) {
+
+            return res.status(404).json({
+                error: "Pet not found"
+            });
+
+        }
+
+
         const [result] = await db.query(`
 
-            INSERT INTO Medical_record
+            INSERT INTO medical_record
+
             (
-                checkup_date,
-                pet_id,
-                diagnosis,
-                treatment_status
+                Checkup_date,
+                Pet_id,
+                Diagnosis,
+                Treatment_status
             )
 
             VALUES (?, ?, ?, ?)
 
         `, [
             checkup_date,
-            pet_id,
+            petId,
             diagnosis,
             treatment_status
         ]);
 
-        res.json({
-            message: "Medical record added successfully!",
-            medical_id: result.insertId
+
+        res.status(201).json({
+
+            message:
+                "Medical record added successfully",
+
+            medical_id:
+                result.insertId
+
         });
+
 
     } catch (error) {
 
-        console.error("Medical record error:", error);
+        console.error(error);
 
         res.status(500).json({
             error: "Failed to add medical record"
@@ -227,231 +516,97 @@ app.post("/api/medical-records", async (req, res) => {
 });
 
 
-// =====================================================
-// COMPLEX QUERY 1
-// UPCOMING VACCINATION + LATEST MEDICAL RECORD
-// =====================================================
-
-app.get("/api/health/upcoming", async (req, res) => {
-
-    try {
-
-        const [rows] = await db.query(`
-
-            SELECT
-
-                p.pet_id,
-                p.name AS pet_name,
-                p.species,
-                p.breed_name,
-
-                u.name AS owner_name,
-                u.phone AS owner_phone,
-
-                v.vaccination_name,
-                v.next_due_date,
-
-                m.checkup_date AS last_checkup,
-                m.diagnosis AS last_diagnosis,
-                m.treatment_status
-
-            FROM Pet p
-
-            JOIN User u
-                ON p.owner_id = u.user_id
-
-            JOIN Vaccination v
-                ON p.pet_id = v.pet_id
-
-            LEFT JOIN Medical_record m
-
-                ON m.pet_id = p.pet_id
-
-                AND m.checkup_date = (
-
-                    SELECT MAX(m2.checkup_date)
-
-                    FROM Medical_record m2
-
-                    WHERE m2.pet_id = p.pet_id
-
-                )
-
-            WHERE v.next_due_date
-
-                BETWEEN CURDATE()
-
-                AND DATE_ADD(
-                    CURDATE(),
-                    INTERVAL 30 DAY
-                )
-
-            ORDER BY v.next_due_date ASC
-
-        `);
-
-        res.json(rows);
-
-    } catch (error) {
-
-        console.error("Upcoming vaccination error:", error);
-
-        res.status(500).json({
-            error: "Failed to fetch upcoming vaccinations"
-        });
-
-    }
-
-});
+// ============================================================
+// FEATURE 2
+// FIND NEARBY VETERINARIANS
+// ============================================================
 
 
-// =====================================================
-// FEATURE 2: FIND NEARBY VETERINARIANS
-// =====================================================
+// ------------------------------------------------------------
+// GET ALL VETERINARIANS
+// ------------------------------------------------------------
 
-app.get("/api/veterinarians", async (req, res) => {
+app.get("/veterinarians", async (req, res) => {
 
     try {
 
-        const city = req.query.city;
-        const zip = req.query.zip_code;
-        const specialization = req.query.specialization;
+        const {
+            city,
+            area
+        } = req.query;
+
 
         let sql = `
 
-            SELECT
-                vet_id,
-                clinic_name,
-                doctor_name,
-                specialization,
-                email,
-                phone_number,
-                street_address,
-                city,
-                zip_code
+            SELECT *
 
-            FROM Veterinarian
+            FROM veterinarian
 
             WHERE 1 = 1
 
         `;
 
-        const values = [];
+
+        const params = [];
+
+
+        // Search by city
 
         if (city) {
 
-            sql += ` AND city LIKE ? `;
-            values.push(`%${city}%`);
+            sql += `
+
+                AND LOWER(City)
+                = LOWER(?)
+
+            `;
+
+            params.push(city);
 
         }
 
-        if (zip) {
 
-            sql += ` AND zip_code = ? `;
-            values.push(zip);
+        // Search by area/address
+
+        if (area) {
+
+            sql += `
+
+                AND LOWER(Street_Address)
+                LIKE LOWER(?)
+
+            `;
+
+            params.push(`%${area}%`);
 
         }
 
-        if (specialization) {
 
-            sql += ` AND specialization LIKE ? `;
-            values.push(`%${specialization}%`);
+        sql += `
 
-        }
+            ORDER BY Clinic_Name ASC
 
-        sql += ` ORDER BY clinic_name `;
+        `;
 
-        const [rows] = await db.query(sql, values);
+
+        const [rows] =
+            await db.query(
+                sql,
+                params
+            );
+
 
         res.json(rows);
 
-    } catch (error) {
-
-        console.error("Veterinarian error:", error);
-
-        res.status(500).json({
-            error: "Failed to find veterinarians"
-        });
-
-    }
-
-});
-
-
-// =====================================================
-// FEATURE 3: LOST AND FOUND PET REPORT
-// =====================================================
-
-app.post("/api/pet-reports", async (req, res) => {
-
-    try {
-
-        const {
-            last_seen_date,
-            description,
-            user_id,
-            pet_id,
-            report_type,
-            pet_picture,
-            identifying_mark,
-            zip_code,
-            city,
-            area_name,
-            share_location_url
-        } = req.body;
-
-
-        const [result] = await db.query(`
-
-            INSERT INTO Pet_report
-
-            (
-                last_seen_date,
-                description,
-                user_id,
-                pet_id,
-                report_type,
-                pet_picture,
-                identifying_mark,
-                zip_code,
-                city,
-                area_name,
-                share_location_url
-            )
-
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-
-        `, [
-
-            last_seen_date,
-            description,
-            user_id,
-            pet_id,
-            report_type,
-            pet_picture,
-            identifying_mark,
-            zip_code,
-            city,
-            area_name,
-            share_location_url
-
-        ]);
-
-        res.json({
-
-            message: "Lost/Found report submitted successfully!",
-
-            report_id: result.insertId
-
-        });
 
     } catch (error) {
 
-        console.error("Pet report error:", error);
+        console.error(error);
 
         res.status(500).json({
 
-            error: "Failed to submit pet report"
+            error:
+                "Failed to load veterinarians"
 
         });
 
@@ -460,265 +615,131 @@ app.post("/api/pet-reports", async (req, res) => {
 });
 
 
-// Get lost/found reports
-app.get("/api/pet-reports", async (req, res) => {
+// ------------------------------------------------------------
+// FIND NEARBY VETERINARIANS
+//
+// NOTE:
+// This endpoint uses the latitude/longitude columns ONLY IF
+// your existing veterinarian table already has them.
+//
+// If your existing SQL does NOT have Latitude/Longitude,
+// use /veterinarians?city=Dhaka&area=Dhanmondi instead.
+// ------------------------------------------------------------
+
+app.get("/veterinarians/nearby", async (req, res) => {
 
     try {
+
+        const lat =
+            Number(req.query.lat);
+
+        const lng =
+            Number(req.query.lng);
+
+        const radius =
+            Number(req.query.radius || 10);
+
+
+        if (
+            !Number.isFinite(lat) ||
+            !Number.isFinite(lng) ||
+            !Number.isFinite(radius)
+        ) {
+
+            return res.status(400).json({
+
+                error:
+                    "Valid latitude, longitude and radius are required"
+
+            });
+
+        }
+
+
+        /*
+         IMPORTANT:
+
+         This query assumes your EXISTING veterinarian table
+         already contains Latitude and Longitude.
+
+         If it does not, use the city/area endpoint above.
+        */
 
         const [rows] = await db.query(`
 
             SELECT
 
-                pr.report_id,
-                pr.report_type,
-                pr.last_seen_date,
-                pr.description,
-                pr.city,
-                pr.area_name,
-                pr.status,
+                *,
 
-                p.name AS pet_name,
-                p.species,
-                p.breed_name,
-                p.color
+                (
+                    6371 *
 
-            FROM Pet_report pr
+                    ACOS(
 
-            LEFT JOIN Pet p
-                ON pr.pet_id = p.pet_id
+                        LEAST(
+                            1,
 
-            WHERE pr.status = 'Active'
+                            GREATEST(
 
-            ORDER BY pr.report_date DESC
+                                -1,
 
-        `);
+                                COS(RADIANS(?))
 
-        res.json(rows);
+                                *
 
-    } catch (error) {
+                                COS(RADIANS(Latitude))
 
-        console.error("Pet report error:", error);
+                                *
 
-        res.status(500).json({
+                                COS(
 
-            error: "Failed to fetch reports"
+                                    RADIANS(Longitude)
+                                    -
+                                    RADIANS(?)
 
-        });
+                                )
 
-    }
+                                +
 
-});
+                                SIN(RADIANS(?))
 
+                                *
 
-// =====================================================
-// COMPLEX QUERY 2
-// LOST AND FOUND PET MATCHING
-// =====================================================
+                                SIN(RADIANS(Latitude))
 
-app.get("/api/pet-reports/matches", async (req, res) => {
+                            )
 
-    try {
+                        )
 
-        const [rows] = await db.query(`
+                    )
 
-            SELECT
-
-                l.report_id AS lost_report_id,
-                f.report_id AS found_report_id,
-
-                lp.name AS lost_pet_name,
-                fp.name AS found_pet_name,
-
-                lp.species,
-                lp.breed_name,
-                lp.color,
-
-                l.city AS lost_city,
-                f.city AS found_city,
-
-                l.area_name AS lost_area,
-                f.area_name AS found_area,
-
-                CASE
-
-                    WHEN
-                        lp.species = fp.species
-                        AND lp.breed_name = fp.breed_name
-                        AND lp.color = fp.color
-                        AND l.city = f.city
-
-                    THEN 'Strong Match'
+                ) AS distance_km
 
 
-                    WHEN
-                        lp.species = fp.species
-                        AND lp.color = fp.color
-                        AND l.city = f.city
-
-                    THEN 'Possible Match'
-
-
-                    ELSE 'Weak Match'
-
-                END AS match_status
-
-
-            FROM Pet_report l
-
-
-            JOIN Pet_report f
-
-                ON l.report_type = 'Lost'
-                AND f.report_type = 'Found'
-
-
-            JOIN Pet lp
-                ON l.pet_id = lp.pet_id
-
-
-            JOIN Pet fp
-                ON f.pet_id = fp.pet_id
+            FROM veterinarian
 
 
             WHERE
 
-                l.status = 'Active'
-                AND f.status = 'Active'
+                Latitude IS NOT NULL
 
-                AND lp.species = fp.species
-
-                AND (
-                    lp.breed_name = fp.breed_name
-                    OR lp.color = fp.color
-                )
-
-                AND l.city = f.city
-
-
-            ORDER BY
-
-                CASE
-
-                    WHEN
-                        lp.breed_name = fp.breed_name
-                        AND lp.color = fp.color
-
-                    THEN 1
-
-                    WHEN lp.color = fp.color
-
-                    THEN 2
-
-                    ELSE 3
-
-                END
-
-        `);
-
-        res.json(rows);
-
-    } catch (error) {
-
-        console.error("Matching error:", error);
-
-        res.status(500).json({
-
-            error: "Failed to find possible matches"
-
-        });
-
-    }
-
-});
-
-
-// =====================================================
-// COMPLEX QUERY 3
-// VETERINARIANS WITH ABOVE-AVERAGE VISITS
-// =====================================================
-
-app.get("/api/veterinarians/analytics", async (req, res) => {
-
-    try {
-
-        const city = req.query.city || "Dhaka";
-
-
-        const [rows] = await db.query(`
-
-            SELECT
-
-                v.vet_id,
-                v.clinic_name,
-                v.doctor_name,
-                v.specialization,
-                v.city,
-
-                COUNT(DISTINCT vv.visit_id)
-                    AS total_visits
-
-
-            FROM Veterinarian v
-
-
-            LEFT JOIN Vet_Visit vv
-
-                ON v.vet_id = vv.vet_id
-
-
-            WHERE v.city = ?
-
-
-            GROUP BY
-
-                v.vet_id,
-                v.clinic_name,
-                v.doctor_name,
-                v.specialization,
-                v.city
+                AND Longitude IS NOT NULL
 
 
             HAVING
 
-                COUNT(DISTINCT vv.visit_id)
-
-                >
-
-                (
-
-                    SELECT AVG(visit_count)
-
-                    FROM (
-
-                        SELECT
-
-                            v2.vet_id,
-
-                            COUNT(DISTINCT vv2.visit_id)
-                                AS visit_count
+                distance_km <= ?
 
 
-                        FROM Veterinarian v2
+            ORDER BY
+                distance_km ASC
 
-
-                        LEFT JOIN Vet_Visit vv2
-
-                            ON v2.vet_id = vv2.vet_id
-
-
-                        WHERE v2.city = ?
-
-
-                        GROUP BY v2.vet_id
-
-                    ) AS vet_statistics
-
-                )
-
-
-            ORDER BY total_visits DESC
-
-        `, [city, city]);
+        `, [
+            lat,
+            lng,
+            lat,
+            radius
+        ]);
 
 
         res.json(rows);
@@ -726,11 +747,17 @@ app.get("/api/veterinarians/analytics", async (req, res) => {
 
     } catch (error) {
 
-        console.error("Veterinarian analytics error:", error);
+        console.error(error);
+
+        /*
+         If Latitude/Longitude do not exist in your
+         existing SQL, this endpoint will return an error.
+        */
 
         res.status(500).json({
 
-            error: "Failed to calculate veterinarian analytics"
+            error:
+                "Nearby search requires Latitude and Longitude columns in the existing veterinarian table."
 
         });
 
@@ -739,26 +766,619 @@ app.get("/api/veterinarians/analytics", async (req, res) => {
 });
 
 
-// =====================================================
-// TEST API
-// =====================================================
+// ============================================================
+// FEATURE 3
+// REPORT LOST AND FOUND PETS
+// ============================================================
 
-app.get("/api/test", async (req, res) => {
+
+// ------------------------------------------------------------
+// GET ALL PET REPORTS
+// ------------------------------------------------------------
+
+app.get("/pet-reports", async (req, res) => {
 
     try {
 
-        const [rows] = await db.query(
-            "SELECT 1 AS result"
-        );
+        const {
+            type,
+            status,
+            city,
+            area
+        } = req.query;
+
+
+        let sql = `
+
+            SELECT
+
+                pr.*,
+
+                p.Name AS Pet_name,
+                p.Species,
+                p.Gender,
+
+                u.Name AS Reporter_name,
+                u.Phone AS Reporter_phone,
+                u.Email AS Reporter_email
+
+
+            FROM pet_report pr
+
+
+            LEFT JOIN pet p
+
+                ON pr.Pet_ID = p.Pet_id
+
+
+            LEFT JOIN user u
+
+                ON pr.User_ID = u.User_id
+
+
+            WHERE 1 = 1
+
+        `;
+
+
+        const params = [];
+
+
+        // Lost / Found filter
+
+        if (type) {
+
+            sql += `
+
+                AND LOWER(pr.Report_Type)
+                = LOWER(?)
+
+            `;
+
+            params.push(type);
+
+        }
+
+
+        // Status filter
+
+        if (status) {
+
+            sql += `
+
+                AND LOWER(pr.Status)
+                = LOWER(?)
+
+            `;
+
+            params.push(status);
+
+        }
+
+
+        // City filter
+
+        if (city) {
+
+            sql += `
+
+                AND LOWER(pr.City)
+                = LOWER(?)
+
+            `;
+
+            params.push(city);
+
+        }
+
+
+        // Area filter
+
+        if (area) {
+
+            sql += `
+
+                AND LOWER(pr.AreaName)
+                LIKE LOWER(?)
+
+            `;
+
+            params.push(`%${area}%`);
+
+        }
+
+
+        sql += `
+
+            ORDER BY
+
+                pr.Report_Date DESC,
+                pr.Report_ID DESC
+
+        `;
+
+
+        const [rows] =
+            await db.query(
+                sql,
+                params
+            );
+
+
+        res.json(rows);
+
+
+    } catch (error) {
+
+        console.error(error);
+
+        res.status(500).json({
+
+            error:
+                "Failed to load pet reports"
+
+        });
+
+    }
+
+});
+
+
+// ------------------------------------------------------------
+// GET ONE PET REPORT
+// ------------------------------------------------------------
+
+app.get("/pet-reports/:reportId", async (req, res) => {
+
+    try {
+
+        const reportId =
+            Number(req.params.reportId);
+
+
+        if (!Number.isInteger(reportId)) {
+
+            return res.status(400).json({
+
+                error:
+                    "Invalid report ID"
+
+            });
+
+        }
+
+
+        const [rows] =
+            await db.query(`
+
+                SELECT
+
+                    pr.*,
+
+                    p.Name AS Pet_name,
+                    p.Species,
+                    p.Gender,
+                    p.Color,
+                    p.Breed_Name,
+
+                    u.Name AS Reporter_name,
+                    u.Phone AS Reporter_phone,
+                    u.Email AS Reporter_email
+
+
+                FROM pet_report pr
+
+
+                LEFT JOIN pet p
+
+                    ON pr.Pet_ID = p.Pet_id
+
+
+                LEFT JOIN user u
+
+                    ON pr.User_ID = u.User_id
+
+
+                WHERE
+
+                    pr.Report_ID = ?
+
+            `, [
+                reportId
+            ]);
+
+
+        if (rows.length === 0) {
+
+            return res.status(404).json({
+
+                error:
+                    "Pet report not found"
+
+            });
+
+        }
+
+
+        res.json(rows[0]);
+
+
+    } catch (error) {
+
+        console.error(error);
+
+        res.status(500).json({
+
+            error:
+                "Failed to load pet report"
+
+        });
+
+    }
+
+});
+
+
+// ------------------------------------------------------------
+// CREATE LOST / FOUND PET REPORT
+// ------------------------------------------------------------
+
+app.post("/pet-reports", async (req, res) => {
+
+    try {
+
+        const {
+
+            last_seen_date,
+            description,
+
+            user_id,
+            pet_id,
+
+            report_type,
+            status,
+            report_date,
+
+            pet_pic_url,
+            identifying_mark,
+
+            zip_code,
+            city,
+            area_name,
+
+            share_location_url
+
+        } = req.body;
+
+
+        // Report type must be Lost or Found
+
+        if (
+            !report_type ||
+            !["Lost", "Found"].includes(report_type)
+        ) {
+
+            return res.status(400).json({
+
+                error:
+                    "Report type must be Lost or Found"
+
+            });
+
+        }
+
+
+        // Required fields
+
+        if (
+            !description ||
+            !city ||
+            !area_name
+        ) {
+
+            return res.status(400).json({
+
+                error:
+                    "Description, city and area are required"
+
+            });
+
+        }
+
+
+        // Check user if provided
+
+        if (user_id != null) {
+
+            const [users] =
+                await db.query(`
+
+                    SELECT User_id
+
+                    FROM user
+
+                    WHERE User_id = ?
+
+                `, [
+                    user_id
+                ]);
+
+
+            if (users.length === 0) {
+
+                return res.status(400).json({
+
+                    error:
+                        "User not found"
+
+                });
+
+            }
+
+        }
+
+
+        // Check pet if provided
+
+        if (pet_id != null) {
+
+            if (
+                !(await petExists(
+                    Number(pet_id)
+                ))
+            ) {
+
+                return res.status(400).json({
+
+                    error:
+                        "Pet not found"
+
+                });
+
+            }
+
+        }
+
+
+        const finalStatus =
+            status || "Open";
+
+
+        const finalReportDate =
+            report_date ||
+            new Date()
+                .toISOString()
+                .slice(0, 10);
+
+
+        const [result] =
+            await db.query(`
+
+                INSERT INTO pet_report
+
+                (
+
+                    Last_seen_Date,
+                    Description,
+
+                    User_ID,
+                    Pet_ID,
+
+                    Report_Type,
+                    Status,
+                    Report_Date,
+
+                    Pet_pic_url,
+                    Identifying_mark,
+
+                    Zip_code,
+                    City,
+                    AreaName,
+
+                    Share_location_url
+
+                )
+
+
+                VALUES
+
+                (
+
+                    ?,
+                    ?,
+
+                    ?,
+                    ?,
+
+                    ?,
+                    ?,
+                    ?,
+
+                    ?,
+                    ?,
+
+                    ?,
+                    ?,
+                    ?,
+
+                    ?
+
+                )
+
+            `, [
+
+                last_seen_date || null,
+                description,
+
+                user_id || null,
+                pet_id || null,
+
+                report_type,
+                finalStatus,
+                finalReportDate,
+
+                pet_pic_url || null,
+                identifying_mark || null,
+
+                zip_code || null,
+                city,
+                area_name,
+
+                share_location_url || null
+
+            ]);
+
+
+        const [newReport] =
+            await db.query(`
+
+                SELECT *
+
+                FROM pet_report
+
+                WHERE Report_ID = ?
+
+            `, [
+                result.insertId
+            ]);
+
+
+        res.status(201).json({
+
+            message:
+                `${report_type} pet report created successfully`,
+
+            report:
+                newReport[0]
+
+        });
+
+
+    } catch (error) {
+
+        console.error(error);
+
+        res.status(500).json({
+
+            error:
+                "Failed to create pet report"
+
+        });
+
+    }
+
+});
+
+
+// ------------------------------------------------------------
+// UPDATE LOST/FOUND REPORT STATUS
+// ------------------------------------------------------------
+
+app.patch(
+    "/pet-reports/:reportId/status",
+    async (req, res) => {
+
+        try {
+
+            const reportId =
+                Number(req.params.reportId);
+
+            const {
+                status
+            } = req.body;
+
+
+            if (!Number.isInteger(reportId)) {
+
+                return res.status(400).json({
+
+                    error:
+                        "Invalid report ID"
+
+                });
+
+            }
+
+
+            if (!status) {
+
+                return res.status(400).json({
+
+                    error:
+                        "Status is required"
+
+                });
+
+            }
+
+
+            const [result] =
+                await db.query(`
+
+                    UPDATE pet_report
+
+                    SET Status = ?
+
+                    WHERE Report_ID = ?
+
+                `, [
+                    status,
+                    reportId
+                ]);
+
+
+            if (result.affectedRows === 0) {
+
+                return res.status(404).json({
+
+                    error:
+                        "Pet report not found"
+
+                });
+
+            }
+
+
+            res.json({
+
+                message:
+                    "Pet report status updated successfully"
+
+            });
+
+
+        } catch (error) {
+
+            console.error(error);
+
+            res.status(500).json({
+
+                error:
+                    "Failed to update report status"
+
+            });
+
+        }
+
+    }
+);
+
+
+// ============================================================
+// DATABASE HEALTH CHECK
+// ============================================================
+
+app.get("/api/health", async (req, res) => {
+
+    try {
+
+        await db.query("SELECT 1");
 
         res.json({
 
-            success: true,
+            status: "OK",
 
-            message:
-                "Find My Paw backend and MySQL are connected!",
-
-            result: rows
+            database: "Connected"
 
         });
 
@@ -768,137 +1388,36 @@ app.get("/api/test", async (req, res) => {
 
         res.status(500).json({
 
-            success: false,
+            status: "ERROR",
 
-            message: "Database connection failed"
+            database: "Disconnected"
 
         });
 
     }
 
 });
-// FEATURE 1 Adoption analytics based on breed
-
-app.get("/analytics/adoption-breed", async (req, res) => {
-    try {
-
-        const [rows] = await db.query(`
-            SELECT 
-                pet.Breed_Name,
-                COUNT(adoption_application.Application_id) AS Applications
-            FROM pet
-            JOIN adoption_application
-                ON pet.Pet_id = adoption_application.Pet_id
-            GROUP BY pet.Breed_Name
-            ORDER BY Applications DESC
-        `);
-
-        res.json(rows);
-
-    } catch (error) {
-        console.error("Adoption analytics error:", error);
-
-        res.status(500).json({
-            error: "Failed to load adoption analytics"
-        });
-    }
-});
-
-// FEATURE 2  Compare each pet's medical records with average
 
 
-app.get("/analytics/medical", async (req, res) => {
-    try {
+// ============================================================
+// 404
+// ============================================================
 
-        const [rows] = await db.query(`
-            SELECT
-                pet.Pet_id,
-                pet.Name,
-                COUNT(medical_record.Medical_id) AS Medical_records,
+app.use((req, res) => {
 
-                (
-                    SELECT AVG(record_count)
-                    FROM (
-                        SELECT COUNT(Medical_id) AS record_count
-                        FROM medical_record
-                        GROUP BY Pet_id
-                    ) AS medical_counts
-                ) AS Average_records
+    res.status(404).json({
 
-            FROM pet
-            LEFT JOIN medical_record
-                ON pet.Pet_id = medical_record.Pet_id
+        error:
+            "Endpoint not found"
 
-            GROUP BY pet.Pet_id, pet.Name
+    });
 
-            ORDER BY pet.Pet_id
-        `);
-
-        // Add comparison text
-        rows.forEach(pet => {
-
-            if (pet.Medical_records > pet.Average_records) {
-                pet.Comparison = "Above Average";
-            }
-            else if (pet.Medical_records < pet.Average_records) {
-                pet.Comparison = "Below Average";
-            }
-            else {
-                pet.Comparison = "Average";
-            }
-
-        });
-
-        res.json(rows);
-
-    } catch (error) {
-        console.error("Medical analytics error:", error);
-
-        res.status(500).json({
-            error: "Failed to load medical analytics"
-        });
-    }
-});
-
-// FEATURE 3  Categories with above average spending
-
-
-app.get("/analytics/expenses", async (req, res) => {
-    try {
-
-        const [rows] = await db.query(`
-            SELECT
-                Category_name,
-                SUM(Amount) AS Total_spending
-            FROM expense
-            GROUP BY Category_name
-            HAVING SUM(Amount) > (
-                SELECT AVG(category_total)
-                FROM (
-                    SELECT SUM(Amount) AS category_total
-                    FROM expense
-                    GROUP BY Category_name
-                ) AS category_spending
-            )
-            ORDER BY Total_spending DESC
-        `);
-
-        res.json(rows);
-
-    } catch (error) {
-        console.error("Expense analytics error:", error);
-
-        res.status(500).json({
-            error: "Failed to load expense analytics"
-        });
-    }
 });
 
 
-
-// =====================================================
+// ============================================================
 // START SERVER
-// =====================================================
+// ============================================================
 
 app.listen(PORT, () => {
 
